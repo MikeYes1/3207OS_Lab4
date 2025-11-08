@@ -2,32 +2,47 @@
 #include <pthread.h>
 #include <string.h>
 #include <semaphore.h> // compile by linking "-lpthread -lrt"
+#include <stdlib.h>
 
-#define QUEUE_SIZE 5
+#define BUFF_SIZE 5
+
+sem_t table_sema, customer_sema;
+pthread_mutex_t waiting_mutex, order_mutex, complete_order_mutex;
+pthread_cond_t seat_customer = PTHREAD_COND_INITIALIZER;
+int waiting_count = 0;
+int total_customers;
+//int customer_number;
 
 typedef struct {
     char s[30]; //struct for information about the order itself
     //int type; maybe not in case of two order queues
-    int customerID;
+    pthread_cond_t customerID;
 } Order;
 
-typedef struct {
-    Order items[QUEUE_SIZE]; //change to be variable
-    int front;      //Variables to help with indexing for FIFO 
-    //int rear; //index not size?
+typedef struct { //Help from ChatGPT to make a variable sized array
+    int size;
+    int front;      //Variable to help with indexing for FIFO 
+    //int rear;
     int count;
+    pthread_cond_t not_full, not_empty;
+    //sem_t sem; //Not really part of the queue, but pthread_create can only pass one argument, so this struct
+              //should include everything that's needed for the functions.
+    Order items[]; //change to be variable
 } Queue;
 
-void _init_(Queue *q){
+void _init_(Queue *q, int size/*,sem_t table_sema*/){
+    q->size = size; 
     q->front = -1;
-    //q->size = size;
     //q->rear = -1;
     q->count = 0; 
+    //q->sem = table_sema;
+    q->not_full = PTHREAD_COND_INITIALIZER;
+    q->not_empty = PTHREAD_COND_INITIALIZER;    
 }
 
 void enqueue(Queue *qu, Order meal){ 
     
-    if(qu->count < QUEUE_SIZE){
+    if(qu->count < qu->size){
         for(int i = qu->front; i > -1; i--){ //Doesn't run this loop when the queue's empty
             qu->items[i + 1] = qu->items[i];
         }
@@ -64,34 +79,82 @@ Order dequeue(Queue *qu){
 }
 
 void* customer(void* arg){    //generate data and put it in the buffer
-
-    /*Immediately enqueues something that's like a record. don't make this array too small.
-    waiting_count++
-    wait but in a way so waiter can pull you out, and when you done waiter also knows
-    wating_count--*/
-
-    //pthread_t CID = pthread_self();
     
-    //waiting for a wake up from waiter
-
-    /*Make sure the queue is not full in a while loop
-    wait for mutex to be free and atomically do ...
-    get pthread_mutex (the called cs will have a predicate for allowing people in)
-    create an order. ID from (*int)CID. Message aspect will come from the lab3 array randomizer.
-    enqueue an order. 
-    release lock on the order-to-chef queue.*/
+    Queue **queues = arg; //Pointer array of two pointers to struct... so confusing. I used ChatGPT to help.
     
-    //Customer is waiting for a signal from the waiter with its specific condition variable
-
-    //sem_post(&table_sem);          
+    Order arrival;
+    pthread_cond_init(&arrival.customerID, NULL); //or random junk value. hopefully this saves value then decrements...
+    strcpy(arrival.s, "waiting");
     
-    //Decrements global variable of total customers
+    //mutex lock?
+    //cond_wait NEEDS the pthread_mutex_t mutex
+
+    pthread_mutex_lock(&waiting_mutex); //acquires
+    while(queues[0]->count == queues[0]->size){ //while the queue is full...
+        pthread_cond_wait(&queues[0]->not_full, &waiting_mutex); //releases and blocks. signalled by a waiter obtaining table
+    }
+    enqueue(queues[0], arrival);
+    waiting_count++;
+    pthread_cond_signal(&queues[0]->not_empty);
+    pthread_cond_wait(&seat_customer, &waiting_mutex); //block for waiter
+    waiting_count--; 
+    pthread_mutex_unlock(&waiting_mutex); 
+
+    
+    //change arrival order to a menu item
+    
+    pthread_mutex_lock(&order_mutex);
+
+    while(queues[1]->count == queues[1]->size){ //while the queue is full...
+        pthread_cond_wait(&queues[1]->not_full, &order_mutex); //releases and blocks. signalled by a waiter obtaining table
+    }
+    enqueue(queues[1], arrival);//will have an array of Queue object
+    pthread_cond_signal(&queues[1]->not_empty);
+    
+    pthread_cond_wait(&arrival.customerID, &order_mutex);//<---- dangerous??
+    pthread_mutex_unlock(&order_mutex); 
+
+    sem_post(&table_sema); 
+    
+    total_customers--;
     return NULL;
 }
 
 void* waiter(void* arg){ //These functions must return void* to be used with pthread
     
+    Queue **queues = arg;
+    Order order;
+    
     //Loop, while remaining_customers != 0
+    while(total_customers != 0){
+        
+        sem_wait(&table_sema); //in lock? 
+        
+        pthread_mutex_lock(&waiting_mutex);
+        while(queues[0]->count != 0){
+            pthread_cond_wait(&queues[0]->not_empty, &waiting_mutex);
+        }
+        dequeue(queues[0]);
+        pthread_cond_signal(&queues[0]->not_full);
+        
+        //if waiting_count != 0?
+        pthread_cond_signal(&seat_customer);
+        pthread_mutex_unlock(&waiting_mutex);
+        
+        //mutex for completed order
+        
+        pthread_mutex_lock(&complete_order_mutex);
+        while(queues[1]->count != 0){
+            pthread_cond_wait(&queues[1]->not_empty, &waiting_mutex);
+        }
+        order = dequeue(queues[1]);
+        pthread_cond_signal(&queues[1]->not_full);        
+        pthread_mutex_unlock(&complete_order_mutex);     
+
+        pthread_cond_signal(&order.customerID); //in lock? probably doesn't matter
+   
+    }
+    
     
     /*sem_wait(&table_sem);
     Code to take a wating customer off of wait queue*/
@@ -112,6 +175,27 @@ void* waiter(void* arg){ //These functions must return void* to be used with pth
 void* chef(void* arg){
     
     //Loop, while remaining_customers != 0
+    Queue **queues = arg;
+    Order order;
+    
+    while(total_customers != 0){
+        pthread_mutex_lock(&order_mutex);
+        while(queues[0]->count != 0){
+            pthread_cond_wait(&queues[0]->not_empty, &order_mutex);
+        }
+        order = dequeue(queues[0]);
+        pthread_cond_signal(&queues[0]->not_full);
+        pthread_mutex_unlock(&order_mutex);
+    
+    
+        pthread_mutex_lock(&complete_order_mutex); //acquires
+        while(queues[1]->count == queues[1]->size){ //while the queue is full...
+            pthread_cond_wait(&queues[1]->not_full, &complete_order_mutex); //releases and blocks. signalled by a waiter obtaining table
+        }
+        enqueue(queues[1], order);
+        pthread_cond_signal(&queues[1]->not_empty);
+        pthread_mutex_unlock(&waiting_mutex); 
+    }
     
     /*lock acquire of order queue
     order = dequeue
@@ -129,11 +213,43 @@ void* chef(void* arg){
 
 int main(int argc, char **argv)
 {
+    int num_tables, num_waiters, num_chefs, waiting_capacity;
     
-    //_init_(&pending_order_queue); and completed queue
     
-    //three arrays for sizes of functions (for IDs?)
+    printf("Welcome yo\n\nEnter the amount of total customers: ");
+    scanf("%d", &total_customers);
+    printf("Enter the amount of tables: ");
+    scanf("%d", &num_tables);
+    printf("Enter the amount of waiters: ");
+    scanf("%d", &num_waiters);   
+    printf("Enter the amount of chefs: ");
+    scanf("%d", &num_chefs);    
+    printf("Enter the amount of customers that can wait at any given time (please be a high number): ");
+    scanf("%d", &waiting_capacity);
     
+    //customer_number = total_customers;
+    
+    sem_init(&table_sema, 0, num_tables); //not static since global?
+    sem_init(&customer_sema, 0, 1);
+    
+    pthread_mutex_init(&waiting_mutex, NULL);
+    pthread_mutex_init(&order_mutex, NULL);
+    pthread_mutex_init(&complete_order_mutex, NULL);
+    
+    //Create all the queues, which are pointers
+    //Didn't feel like making this a seperate function even if it's repetative
+    Queue *waiting_queue = malloc(sizeof(Queue) + sizeof(Order) * waiting_capacity);
+    _init_(waiting_queue, waiting_capacity);
+    Queue *order_queue = malloc(sizeof(Queue) + sizeof(Order) * BUFF_SIZE);
+    _init_(order_queue, BUFF_SIZE);    
+    Queue *completed_order_queue = malloc(sizeof(Queue) + sizeof(Order) * BUFF_SIZE);
+    _init_(completed_order_queue, BUFF_SIZE);
+    
+    Queue *argument_for_customer[2] = {&waiting_queue, &order_queue};
+    
+    //see if there's more than one cv to make global
+
+
     if(/*pthread_create(pthread_t &wthread, NULL, waiter, NULL)*/ 0 != 0){ 
         perror("Thread creation failed");
         exit(1);
@@ -159,7 +275,13 @@ int main(int argc, char **argv)
     
     printf("Hello World\n");
     
+    pthread_mutex_destroy(&order_mutex);
+    pthread_mutex_destroy(&complete_order_mutex);
+
     
+    free(waiting_queue);
+    free(order_queue);
+    free(completed_order_queue);
     
     return 0;
 }
