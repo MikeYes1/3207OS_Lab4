@@ -101,7 +101,7 @@ void* customer(void* arg){    //generate data and put it in the buffer
     pthread_mutex_unlock(&waiting_mutex); 
 
     
-    //change arrival order to a menu item
+    strcpy(arrival.s, "order up!");
     
     pthread_mutex_lock(&order_mutex);
 
@@ -116,6 +116,7 @@ void* customer(void* arg){    //generate data and put it in the buffer
 
     sem_post(&table_sema); 
     
+    printf("\nCustomer %d done\n", total_customers);
     total_customers--;
     return NULL;
 }
@@ -159,15 +160,7 @@ void* waiter(void* arg){ //These functions must return void* to be used with pth
     /*sem_wait(&table_sem);
     Code to take a wating customer off of wait queue*/
 
-    //wake up a random customer. (they order)
-
-     /*Make sure the queue is not empty in a while loop
-    wait for mutex to be free and atomically do ...
-    get pthread_mutex
-    customerOrder = dequeue(completed_order_queue);
-    release lock on the completed_order queue.*/
-     
-    //wake up customer with the same cv as its CID
+    //wake up a random customer. (they order
     
     return NULL;
 }
@@ -227,7 +220,7 @@ int main(int argc, char **argv)
     printf("Enter the amount of customers that can wait at any given time (please be a high number): ");
     scanf("%d", &waiting_capacity);
     
-    //customer_number = total_customers;
+    int num_customers = total_customers;
     
     sem_init(&table_sema, 0, num_tables); //not static since global?
     sem_init(&customer_sema, 0, 1);
@@ -236,24 +229,49 @@ int main(int argc, char **argv)
     pthread_mutex_init(&order_mutex, NULL);
     pthread_mutex_init(&complete_order_mutex, NULL);
     
+    pthread_t customer_threads[num_customers];
+    pthread_t waiter_threads[num_waiters];
+    pthread_t chef_threads[num_chefs];
+    
     //Create all the queues, which are pointers
-    //Didn't feel like making this a seperate function even if it's repetative
+    //Didn't feel like making this a seperate function even if it's repetative here
     Queue *waiting_queue = malloc(sizeof(Queue) + sizeof(Order) * waiting_capacity);
     _init_(waiting_queue, waiting_capacity);
     Queue *order_queue = malloc(sizeof(Queue) + sizeof(Order) * BUFF_SIZE);
     _init_(order_queue, BUFF_SIZE);    
-    Queue *completed_order_queue = malloc(sizeof(Queue) + sizeof(Order) * BUFF_SIZE);
-    _init_(completed_order_queue, BUFF_SIZE);
+    Queue *complete_order_queue = malloc(sizeof(Queue) + sizeof(Order) * BUFF_SIZE);
+    _init_(complete_order_queue, BUFF_SIZE);
     
-    Queue *argument_for_customer[2] = {&waiting_queue, &order_queue};
+    Queue **argument_for_customer[2] = {&waiting_queue, &order_queue};
+    Queue **argument_for_waiter[2] = {&waiting_queue, &complete_order_queue};
+    Queue **argument_for_chef[2] = {&order_queue, &complete_order_queue};
     
-    //see if there's more than one cv to make global
 
-
-    if(/*pthread_create(pthread_t &wthread, NULL, waiter, NULL)*/ 0 != 0){ 
-        perror("Thread creation failed");
-        exit(1);
+    for(int i = 0; i < num_customers; i++){
+        if(pthread_create(&customer_threads[i], NULL, customer, argument_for_customer) != 0){ 
+            perror("Thread creation failed");
+            exit(1);
+        }
     }
+    
+    for(int i = 0; i < num_waiters; i++){
+        if(pthread_create(&waiter_threads[i], NULL, waiter, argument_for_waiter) != 0){ 
+            perror("Thread creation failed");
+            exit(1);
+        }
+    }
+    
+    for(int i = 0; i < num_chefs; i++){
+        if(pthread_create(&chef_threads[i], NULL, chef, argument_for_chef) != 0){ 
+            perror("Thread creation failed");
+            exit(1);
+        }
+    }
+    
+    
+    
+    
+    
     //just make the threads here and that's it. do the function to stop main or to let chefs and waiters there's no more customers
     
     /*
@@ -275,13 +293,16 @@ int main(int argc, char **argv)
     
     printf("Hello World\n");
     
+    pthread_mutex_destroy(&waiting_mutex);
     pthread_mutex_destroy(&order_mutex);
     pthread_mutex_destroy(&complete_order_mutex);
 
     
     free(waiting_queue);
     free(order_queue);
-    free(completed_order_queue);
+    free(complete_order_queue);
+    
+    pthread_exit(NULL);
     
     return 0;
 }
